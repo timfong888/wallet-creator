@@ -1,25 +1,13 @@
 const { Coinbase, Wallet } = require("@coinbase/coinbase-sdk");
+const Database = require("@replit/database");
 const express = require("express");
 const app = express();
 
-// Configure SDK with API key from uploaded file
+// Configure SDK and Database
 Coinbase.configureFromJson({ filePath: "./.keys/cdp_api_key.json" });
-
-// Simple in-memory storage (replace with proper database in production)
-const domainWalletMap = new Map();
+const db = new Database();
 
 app.use(express.json());
-
-// Root path handler
-app.get("/", (req, res) => {
-  res.json({
-    message: "Welcome to the Wallet-Domain API",
-    endpoints: {
-      create_wallet: 'POST /create-wallet with {"domainName": "example.com"}',
-      get_wallet: "GET /wallet/:domainName",
-    },
-  });
-});
 
 // Create wallet and associate with domain
 app.post("/create-wallet", async (req, res) => {
@@ -30,15 +18,31 @@ app.post("/create-wallet", async (req, res) => {
       return res.status(400).json({ error: "Domain name is required" });
     }
 
-    if (domainWalletMap.has(domainName)) {
+    const dbKey = `domain:${domainName}`;
+    console.log("Checking domain:", dbKey);
+
+    const existingWallet = await db.get(dbKey);
+    console.log("Existing wallet check result:", existingWallet);
+
+    if (existingWallet) {
+      console.log("Found existing wallet for domain");
       return res.status(409).json({
         error: "Domain already has an associated wallet",
       });
     }
 
+    console.log("No existing wallet found, creating new one...");
     const wallet = await Wallet.create();
     const address = await wallet.getDefaultAddress();
-    domainWalletMap.set(domainName, wallet.export());
+
+    const walletData = {
+      address: address.toString(),
+      walletData: wallet.export(),
+    };
+
+    console.log("Storing new wallet data for domain:", dbKey);
+    await db.set(dbKey, walletData);
+    console.log("Wallet data stored successfully");
 
     res.json({
       domainName,
@@ -46,7 +50,7 @@ app.post("/create-wallet", async (req, res) => {
       message: "Wallet created and associated with domain",
     });
   } catch (error) {
-    console.error("Error creating wallet:", error);
+    console.error("Error in create-wallet:", error);
     res
       .status(500)
       .json({ error: "Failed to create wallet", details: error.message });
@@ -57,15 +61,15 @@ app.post("/create-wallet", async (req, res) => {
 app.get("/wallet/:domainName", async (req, res) => {
   try {
     const { domainName } = req.params;
-    const walletData = domainWalletMap.get(domainName);
+    const storedData = await db.get(`domain:${domainName}`);
 
-    if (!walletData) {
+    if (!storedData) {
       return res.status(404).json({
         error: "No wallet found for domain",
       });
     }
 
-    const wallet = await Wallet.import(walletData);
+    const wallet = await Wallet.import(storedData.walletData);
     const address = await wallet.getDefaultAddress();
     const balances = await wallet.listBalances();
 
@@ -79,6 +83,28 @@ app.get("/wallet/:domainName", async (req, res) => {
     res
       .status(500)
       .json({ error: "Failed to fetch wallet", details: error.message });
+  }
+});
+
+// Debug endpoint to list all domains
+app.get("/debug/domains", async (req, res) => {
+  try {
+    const keys = await db.list();
+    console.log("All database keys:", keys);
+
+    const domains = {};
+    for (const key of keys) {
+      domains[key] = await db.get(key);
+    }
+
+    res.json({
+      message: "Current database contents",
+      keys: keys,
+      domains: domains,
+    });
+  } catch (error) {
+    console.error("Error in debug endpoint:", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
